@@ -21,7 +21,7 @@ async fn main() -> Result<(), AHScraperError> {
     println!("Starting AH Scraper!");
     println!("Indexing all auctions on the AH to the database.");
     let start = Instant::now();
-    let auctions = hypixel_api::get_all_auctions().await?;
+    //let auctions = hypixel_api::get_all_auctions().await?;
     println!("Finished scraping all auctions in: {:.2?}", start.elapsed());
     let client = Client::with_uri_str(
         format!("mongodb+srv://{}:{}@ahdatabase0.dfdbtmh.mongodb.net/?retryWrites=true&w=majority&authMechanism=SCRAM-SHA-1",
@@ -33,11 +33,9 @@ async fn main() -> Result<(), AHScraperError> {
     let coll = db.collection::<Auction>("auctions");
     println!("Finished Connecting to db, upserting all data now");
     let start = Instant::now();
-    process_auctions_in_parallel(coll, auctions, 100).await?;
+    //process_auctions_in_parallel(coll, auctions, 100).await?;
     println!("Finished indexing all auctions in: {:.2?}", start.elapsed());
-    let handle = task::spawn_blocking(move || {
-        futures::executor::block_on(scrape_task(db))
-    });
+    scrape_task(db).await?;
     Ok(())
 }
 
@@ -47,14 +45,18 @@ async fn scrape_task(db: Database) -> Result<(), AHScraperError> {
     loop {
         interval.tick().await;
         // every 10 minutes we should scan all pages as to update on auctions that may have moved.
-        let auctions = if counter > 12000 {
-            get_all_auctions().await?
-
+        if counter > 12000 {
+            let db_clone = db.clone();
+            tokio::spawn(async move {
+                if let Err(e) = process_auctions_in_parallel(db_clone.collection("auctions"), get_all_auctions().await.unwrap(), 100).await {
+                    eprintln!("Database operation failed: {}", e);
+                }
+            });
         } else {
-            get_first_x_pages_of_auctions(10).await?
+            upsert_auctions(db.collection("auctions"), get_first_x_pages_of_auctions(10).await?).await?;
         };
-        upsert_auctions(db.collection("auctions"), auctions).await?;
         counter += 1;
+        println!("Finished 100 millisecond update");
     }
     Ok(())
 }
@@ -66,9 +68,7 @@ async fn upsert_auctions(coll: Collection<Auction>, auctions: Vec<Auction>) -> R
         let filter = doc! { "uuid": &auction.uuid };
         let update = doc! { "$set": bson::to_bson(&auction)? };
         let options = UpdateOptions::builder().upsert(true).build();
-        let start = Instant::now();
         coll.update_one(filter, update, options).await?;
-        println!("Finished uploading one auction in: {:.2?}", start.elapsed());
     }
     Ok(())
 }
